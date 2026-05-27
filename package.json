@@ -99,7 +99,6 @@
       "<rootDir>/tests/security.middleware.test.js",
       "<rootDir>/tests/server.test.js",
       "<rootDir>/tests/sme.metrics.test.js",
-      "<rootDir>/tests/sme.upload.test.js",
       "<rootDir>/tests/soroban.sim.test.js",
       "<rootDir>/tests/unit/errorHandler.test.js",
       "<rootDir>/tests/unit/migration-utils.test.js",

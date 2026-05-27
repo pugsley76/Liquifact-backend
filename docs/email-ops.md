@@ -41,3 +41,89 @@ const simulatedInvoice = { id: 'test_123', customer: 'Alice', amount: 50 };
 // Schedules immediately (since it's in the past)
 scheduleReminder(simulatedInvoice, new Date(), 'alice@example.com');
 ```
+
+---
+
+# SME Invoice Upload Security Hardening
+
+## Overview
+
+The SME invoice upload flow has been hardened to prevent abuse of presigned S3 URLs. The hardening covers MIME type validation, file size enforcement, tenant/invoice-scoped key generation, bounded URL expiry, and path traversal prevention.
+
+## Accepted MIME Types
+
+Only the following MIME types are accepted for invoice uploads:
+- `application/pdf`
+- `image/jpeg`
+- `image/png`
+- `image/tiff`
+
+Any other MIME type is rejected with a `400 Bad Request` response.
+
+## File Size Limit
+
+Uploads are limited to **512 KB** (configurable via `BODY_LIMIT_INVOICE` environment variable), consistent with the existing body size guardrail.
+
+## Key Scoping
+
+Object keys are generated in the format:
+```
+tenants/{tenantId}/invoices/{invoiceId}/{uuid}-{sanitized-filename}
+```
+
+This ensures:
+- Multi-tenant isolation: files from different tenants cannot collide
+- Per-invoice scoping: all files for an invoice share a prefix
+- Unpredictable naming: UUID prefix prevents enumeration
+
+## Path Traversal Prevention
+
+All filenames are sanitized before key generation:
+- Only the basename is extracted (directory components are stripped)
+- Null bytes (`\0`) are removed
+- `..` sequences are removed
+- Special characters (`<>:"|?*\/`) are replaced with `_`
+- Filenames are truncated to 255 characters
+
+## Presigned URL Expiry
+
+- **Upload URLs**: 15 minutes TTL (short window reduces abuse surface)
+- **Download URLs**: 1 hour default TTL, maximum 24 hours
+- TTL is enforced server-side; credentials are never exposed to clients
+
+## Security Considerations
+
+1. **No credential leakage**: AWS credentials are never returned in API responses or logged
+2. **Server-side validation**: MIME type and file size are validated before URL generation, not just at upload time
+3. **Content-Type enforcement**: The presigned URL includes the Content-Type constraint, so S3 will reject mismatched types
+4. **Content-Length enforcement**: The presigned URL includes the file size, so S3 will reject oversized uploads
+5. **Error messages are safe**: Error responses do not leak internal state or stack traces
+
+## Endpoints
+
+### POST /api/sme/invoice/presigned-url
+Request a presigned upload URL for direct-to-S3 upload.
+
+Request body:
+```json
+{
+  "fileName": "invoice.pdf",
+  "mimeType": "application/pdf",
+  "fileSize": 102400,
+  "invoiceId": "optional-invoice-id"
+}
+```
+
+### POST /api/sme/invoice
+Direct upload via multipart form (multer), validated server-side.
+
+## Environment Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AWS_REGION` | `us-east-1` | AWS region for S3 |
+| `S3_ENDPOINT` | - | S3-compatible endpoint (e.g., MinIO) |
+| `AWS_ACCESS_KEY_ID` | - | S3 access key |
+| `AWS_SECRET_ACCESS_KEY` | - | S3 secret key |
+| `S3_BUCKET` | `liquifact-invoices` | S3 bucket name |
+| `BODY_LIMIT_INVOICE` | `512kb` | Max invoice file size |

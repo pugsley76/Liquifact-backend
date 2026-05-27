@@ -1,9 +1,9 @@
 /**
  * @fileoverview Invoice File Operations with Integrity Verification
- * 
+ *
  * Handles PDF upload, storage, and SHA-256 hash-based integrity verification.
  * Protects against file tampering by computing and storing cryptographic hashes.
- * 
+ *
  * @module routes/invoiceFile
  */
 
@@ -11,71 +11,111 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const storageService = require('../services/storage');
 const router = express.Router();
 
-// In-memory storage for invoice files and hashes (production: use database + S3/blob storage)
 const invoiceFiles = new Map();
 
-/**
- * Computes SHA-256 hash of buffer data.
- * 
- * @param {Buffer} buffer - File data as buffer
- * @returns {string} Hex-encoded SHA-256 hash
- */
 function computeHash(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 /**
+ * POST /api/invoices/:id/presigned-upload
+ * Generate a presigned upload URL scoped to this invoice.
+ */
+router.post('/:id/presigned-upload', express.json(), async (req, res) => {
+  const { id } = req.params;
+
+  if (!id || typeof id !== 'string' || id.trim() === '') {
+    return res.status(400).json({
+      error: 'Bad Request',
+      message: 'Invalid invoice ID',
+    });
+  }
+
+  try {
+    const { fileName, mimeType, fileSize } = req.body;
+
+    if (!fileName || !mimeType || fileSize == null) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'fileName, mimeType, and fileSize are required',
+      });
+    }
+
+    const tenantId = req.user?.id || req.user?.sub || 'unknown';
+
+    const result = await storageService.getPresignedUploadUrl({
+      tenantId,
+      invoiceId: id,
+      fileName,
+      mimeType,
+      fileSize,
+    });
+
+    return res.status(201).json({
+      data: {
+        invoiceId: id,
+        uploadUrl: result.url,
+        fileKey: result.key,
+      },
+      message: 'Presigned upload URL generated',
+    });
+  } catch (error) {
+    if (error.code === 'INVALID_MIME_TYPE' || error.code === 'FILE_TOO_LARGE') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: error.message,
+      });
+    }
+    console.error('Presigned upload error:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Failed to generate presigned upload URL',
+    });
+  }
+});
+
+/**
  * POST /api/invoices/:id/file
  * Upload PDF file for an invoice and compute integrity hash.
- * 
- * Security:
- * - Validates Content-Type is application/pdf
- * - Enforces size limits via body parser
- * - Computes SHA-256 hash for tamper detection
- * - Stores hash with file metadata
  */
 router.post('/:id/file', express.raw({ type: 'application/pdf', limit: '5mb' }), (req, res) => {
   const { id } = req.params;
 
-  // Validate invoice ID
   if (!id || typeof id !== 'string' || id.trim() === '') {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'Invalid invoice ID'
+      message: 'Invalid invoice ID',
     });
   }
 
-  // Validate Content-Type
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/pdf')) {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'Content-Type must be application/pdf'
+      message: 'Content-Type must be application/pdf',
     });
   }
 
-  // Validate file data exists
   if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'No file data provided'
+      message: 'No file data provided',
     });
   }
 
-  // Compute SHA-256 hash
   const fileHash = computeHash(req.body);
   const fileSize = req.body.length;
 
-  // Store file with metadata
   invoiceFiles.set(id, {
     invoiceId: id,
     fileData: req.body,
     fileHash,
     fileSize,
     contentType: 'application/pdf',
-    uploadedAt: new Date().toISOString()
+    uploadedAt: new Date().toISOString(),
   });
 
   return res.status(201).json({
@@ -83,9 +123,9 @@ router.post('/:id/file', express.raw({ type: 'application/pdf', limit: '5mb' }),
       invoiceId: id,
       fileHash,
       fileSize,
-      uploadedAt: invoiceFiles.get(id).uploadedAt
+      uploadedAt: invoiceFiles.get(id).uploadedAt,
     },
-    message: 'Invoice file uploaded successfully'
+    message: 'Invoice file uploaded successfully',
   });
 });
 
@@ -99,7 +139,7 @@ router.get('/:id/file', (req, res) => {
   if (!id || typeof id !== 'string' || id.trim() === '') {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'Invalid invoice ID'
+      message: 'Invalid invoice ID',
     });
   }
 
@@ -108,7 +148,7 @@ router.get('/:id/file', (req, res) => {
   if (!fileRecord) {
     return res.status(404).json({
       error: 'Not Found',
-      message: `No file found for invoice ${id}`
+      message: `No file found for invoice ${id}`,
     });
   }
 
@@ -121,8 +161,6 @@ router.get('/:id/file', (req, res) => {
 /**
  * GET /api/invoices/:id/file/verify
  * Verify integrity of uploaded PDF by comparing stored hash with current file hash.
- * 
- * Returns verification status and hash comparison details.
  */
 router.get('/:id/file/verify', (req, res) => {
   const { id } = req.params;
@@ -130,7 +168,7 @@ router.get('/:id/file/verify', (req, res) => {
   if (!id || typeof id !== 'string' || id.trim() === '') {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'Invalid invoice ID'
+      message: 'Invalid invoice ID',
     });
   }
 
@@ -139,11 +177,10 @@ router.get('/:id/file/verify', (req, res) => {
   if (!fileRecord) {
     return res.status(404).json({
       error: 'Not Found',
-      message: `No file found for invoice ${id}`
+      message: `No file found for invoice ${id}`,
     });
   }
 
-  // Recompute hash from stored file data
   const currentHash = computeHash(fileRecord.fileData);
   const storedHash = fileRecord.fileHash;
   const isValid = currentHash === storedHash;
@@ -155,18 +192,15 @@ router.get('/:id/file/verify', (req, res) => {
       storedHash,
       currentHash,
       uploadedAt: fileRecord.uploadedAt,
-      verifiedAt: new Date().toISOString()
+      verifiedAt: new Date().toISOString(),
     },
-    message: isValid ? 'File integrity verified' : 'File integrity check failed'
+    message: isValid ? 'File integrity verified' : 'File integrity check failed',
   });
 });
 
 /**
  * POST /api/invoices/:id/file/verify
  * Verify integrity of a provided PDF against the stored hash.
- * 
- * Accepts PDF in request body and compares its hash with stored hash.
- * Use case: Client wants to verify a downloaded file hasn't been tampered with.
  */
 router.post('/:id/file/verify', express.raw({ type: 'application/pdf', limit: '5mb' }), (req, res) => {
   const { id } = req.params;
@@ -174,7 +208,7 @@ router.post('/:id/file/verify', express.raw({ type: 'application/pdf', limit: '5
   if (!id || typeof id !== 'string' || id.trim() === '') {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'Invalid invoice ID'
+      message: 'Invalid invoice ID',
     });
   }
 
@@ -183,19 +217,17 @@ router.post('/:id/file/verify', express.raw({ type: 'application/pdf', limit: '5
   if (!fileRecord) {
     return res.status(404).json({
       error: 'Not Found',
-      message: `No file found for invoice ${id}`
+      message: `No file found for invoice ${id}`,
     });
   }
 
-  // Validate file data provided
   if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
     return res.status(400).json({
       error: 'Bad Request',
-      message: 'No file data provided for verification'
+      message: 'No file data provided for verification',
     });
   }
 
-  // Compute hash of provided file
   const providedHash = computeHash(req.body);
   const storedHash = fileRecord.fileHash;
   const isValid = providedHash === storedHash;
@@ -207,9 +239,9 @@ router.post('/:id/file/verify', express.raw({ type: 'application/pdf', limit: '5
       storedHash,
       providedHash,
       uploadedAt: fileRecord.uploadedAt,
-      verifiedAt: new Date().toISOString()
+      verifiedAt: new Date().toISOString(),
     },
-    message: isValid ? 'File integrity verified' : 'File integrity check failed - file may have been tampered with'
+    message: isValid ? 'File integrity verified' : 'File integrity check failed - file may have been tampered with',
   });
 });
 

@@ -1,57 +1,449 @@
 const request = require('supertest');
+const crypto = require('crypto');
 const createApp = require('../src/index').createApp;
-
-const app = createApp();
 const storageService = require('../src/services/storage');
 
 jest.mock('../src/services/storage');
 
-describe('SME Invoice Upload', () => {
+const app = createApp();
+
+const VALID_PDF_MIME = 'application/pdf';
+const VALID_JPEG_MIME = 'image/jpeg';
+const BLOCKED_MIME_TYPES = [
+  'text/html',
+  'application/xml',
+  'application/json',
+  'image/gif',
+  'application/octet-stream',
+  'text/plain',
+  'application/javascript',
+];
+
+describe('SME Invoice Upload - Security Hardening', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('should upload PDF invoice successfully', async () => {
-    const mockKey = 'invoices/uuid-test.pdf';
-    const mockSignedUrl = 'https://signed-url.com';
+  describe('Direct Upload (POST /api/sme/invoice)', () => {
+    it('should upload PDF invoice successfully', async () => {
+      const mockKey = 'tenants/user-123/invoices/test-inv/uuid-test.pdf';
+      const mockSignedUrl = 'https://signed-url.example.com/test';
 
-    storageService.uploadFile.mockResolvedValue(mockKey);
-    storageService.getSignedUrl.mockResolvedValue(mockSignedUrl);
+      storageService.uploadFile.mockResolvedValue(mockKey);
+      storageService.getSignedUrl.mockResolvedValue(mockSignedUrl);
 
-    const response = await request(app)
-      .post('/api/sme/invoice')
-      .attach('invoice', Buffer.from('fake pdf content'), 'test.pdf')
-      .set('Content-Type', 'multipart/form-data');
+      const response = await request(app)
+        .post('/api/sme/invoice')
+        .attach('invoice', Buffer.from('fake pdf content'), 'test.pdf')
+        .field('invoiceId', 'test-inv');
 
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({
-      message: 'Invoice uploaded successfully',
-      fileKey: mockKey,
-      signedUrl: mockSignedUrl,
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        message: 'Invoice uploaded successfully',
+        fileKey: mockKey,
+        signedUrl: mockSignedUrl,
+        invoiceId: 'test-inv',
+      });
+      expect(storageService.uploadFile).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        'test.pdf',
+        VALID_PDF_MIME,
+        'unknown',
+        'test-inv',
+      );
     });
-    expect(storageService.uploadFile).toHaveBeenCalledWith(
-      expect.any(Buffer),
-      'test.pdf',
-      'application/pdf'
-    );
+
+    it('should return 400 if no file provided', async () => {
+      const response = await request(app)
+        .post('/api/sme/invoice')
+        .set('Content-Type', 'multipart/form-data');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Invoice file is required');
+    });
+
+    it('should reject upload when storage service rejects INVALID_MIME_TYPE', async () => {
+      const error = new Error('Invalid MIME type: "text/plain". Allowed: application/pdf, image/jpeg, image/png, image/tiff');
+      error.code = 'INVALID_MIME_TYPE';
+      storageService.uploadFile.mockRejectedValue(error);
+
+      const response = await request(app)
+        .post('/api/sme/invoice')
+        .attach('invoice', Buffer.from('bad content'), 'test.txt');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Invalid MIME type');
+    });
+
+    it('should reject upload when storage service rejects FILE_TOO_LARGE', async () => {
+      const error = new Error('File size exceeds maximum');
+      error.code = 'FILE_TOO_LARGE';
+      storageService.uploadFile.mockRejectedValue(error);
+
+      const response = await request(app)
+        .post('/api/sme/invoice')
+        .attach('invoice', Buffer.from('content'), 'test.pdf');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('File size exceeds maximum');
+    });
   });
 
-  it('should return 400 if no file provided', async () => {
-    const response = await request(app)
-      .post('/api/sme/invoice')
-      .set('Content-Type', 'multipart/form-data');
+  describe('Presigned Upload URL (POST /api/sme/invoice/presigned-url)', () => {
+    it('should generate presigned upload URL for valid request', async () => {
+      const mockResult = {
+        url: 'https://s3-presigned.example.com/upload',
+        key: 'tenants/user-123/invoices/inv-abc/uuid-file.pdf',
+      };
+      storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
 
-    expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Invoice file is required');
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        message: 'Presigned upload URL generated',
+        uploadUrl: mockResult.url,
+        fileKey: mockResult.key,
+      });
+      expect(response.body.invoiceId).toBeDefined();
+      expect(storageService.getPresignedUploadUrl).toHaveBeenCalledWith({
+        tenantId: 'unknown',
+        invoiceId: expect.any(String),
+        fileName: 'invoice.pdf',
+        mimeType: VALID_PDF_MIME,
+        fileSize: 50000,
+      });
+    });
+
+    it('should include invoiceId from request body', async () => {
+      const mockResult = {
+        url: 'https://s3-presigned.example.com/upload',
+        key: 'tenants/user-123/invoices/custom-inv-42/uuid-file.pdf',
+      };
+      storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
+
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+          invoiceId: 'custom-inv-42',
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.invoiceId).toBe('custom-inv-42');
+      expect(storageService.getPresignedUploadUrl).toHaveBeenCalledWith({
+        tenantId: 'unknown',
+        invoiceId: 'custom-inv-42',
+        fileName: 'invoice.pdf',
+        mimeType: VALID_PDF_MIME,
+        fileSize: 50000,
+      });
+    });
+
+    it('should return 400 if required fields are missing', async () => {
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({ fileName: 'test.pdf' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('fileName, mimeType, and fileSize are required');
+    });
+
+    it('should return 400 for invalid MIME type', async () => {
+      const error = new Error('Invalid MIME type: "text/html"');
+      error.code = 'INVALID_MIME_TYPE';
+      storageService.getPresignedUploadUrl.mockRejectedValue(error);
+
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({
+          fileName: 'test.html',
+          mimeType: 'text/html',
+          fileSize: 1000,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Invalid MIME type');
+    });
+
+    it('should return 400 for oversized file', async () => {
+      const error = new Error('File size 1048576 exceeds maximum');
+      error.code = 'FILE_TOO_LARGE';
+      storageService.getPresignedUploadUrl.mockRejectedValue(error);
+
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({
+          fileName: 'large.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 1048576,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('File size exceeds maximum');
+    });
+
+    it('should never expose AWS credentials in response', async () => {
+      const mockResult = {
+        url: 'https://s3-presigned.example.com/upload',
+        key: 'tenants/uuid/invoices/uuid/file.pdf',
+      };
+      storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
+
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+        });
+
+      const bodyString = JSON.stringify(response.body);
+      expect(bodyString).not.toContain('AKIA');
+      expect(bodyString).not.toContain('secretAccessKey');
+      expect(bodyString).not.toContain('AWS_ACCESS_KEY');
+      expect(bodyString).not.toContain('aws_secret');
+    });
+  });
+});
+
+describe('StorageService Unit - File Validation', () => {
+  let StorageService;
+
+  beforeAll(() => {
+    StorageService = require('../src/services/storage').StorageService;
   });
 
-  it('should return 400 if file is not PDF', async () => {
+  describe('_sanitizeFilename', () => {
+    const svc = new StorageService();
+
+    it('should strip directory traversal attempts', () => {
+      expect(svc._sanitizeFilename('../../etc/passwd')).toBe('passwd');
+    });
+
+    it('should handle simple filename', () => {
+      expect(svc._sanitizeFilename('invoice.pdf')).toBe('invoice.pdf');
+    });
+
+    it('should remove null bytes', () => {
+      expect(svc._sanitizeFilename('evil\0.pdf')).toBe('evil.pdf');
+    });
+
+    it('should replace special characters with underscores', () => {
+      const result = svc._sanitizeFilename('bad:chars|here?.pdf');
+      expect(result).toBe('bad_chars_here_.pdf');
+    });
+
+    it('should return "unnamed" for empty input', () => {
+      expect(svc._sanitizeFilename('')).toBe('unnamed');
+    });
+
+    it('should return "unnamed" for non-string input', () => {
+      expect(svc._sanitizeFilename(null)).toBe('unnamed');
+      expect(svc._sanitizeFilename(undefined)).toBe('unnamed');
+    });
+
+    it('should truncate long filenames', () => {
+      const long = 'a'.repeat(300) + '.pdf';
+      const result = svc._sanitizeFilename(long);
+      expect(result.length).toBeLessThanOrEqual(255);
+    });
+
+    it('should handle Windows backslash traversal', () => {
+      expect(svc._sanitizeFilename('..\\..\\windows\\system32')).toBe('system32');
+    });
+
+    it('should handle angle brackets in filename', () => {
+      const result = svc._sanitizeFilename('<script>alert(1)</script>.pdf');
+      expect(result).not.toContain('<');
+      expect(result).not.toContain('>');
+    });
+  });
+
+  describe('_validateMimeType', () => {
+    const svc = new StorageService();
+
+    it('should accept application/pdf', () => {
+      expect(svc._validateMimeType('application/pdf')).toBe(true);
+    });
+
+    it('should accept image/jpeg', () => {
+      expect(svc._validateMimeType('image/jpeg')).toBe(true);
+    });
+
+    it('should accept image/png', () => {
+      expect(svc._validateMimeType('image/png')).toBe(true);
+    });
+
+    it('should accept image/tiff', () => {
+      expect(svc._validateMimeType('image/tiff')).toBe(true);
+    });
+
+    it('should reject text/html', () => {
+      expect(svc._validateMimeType('text/html')).toBe(false);
+    });
+
+    it('should reject application/octet-stream', () => {
+      expect(svc._validateMimeType('application/octet-stream')).toBe(false);
+    });
+
+    it('should reject empty string', () => {
+      expect(svc._validateMimeType('')).toBe(false);
+    });
+  });
+
+  describe('_generateKey', () => {
+    const svc = new StorageService();
+    const realUUID = crypto.randomUUID;
+
+    beforeAll(() => {
+      crypto.randomUUID = () => 'fixed-uuid-123';
+    });
+
+    afterAll(() => {
+      crypto.randomUUID = realUUID;
+    });
+
+    it('should generate tenant-scoped key', () => {
+      const key = svc._generateKey('tenant-abc', 'inv-42', 'report.pdf');
+      expect(key).toMatch(/^tenants\/tenant-abc\/invoices\/inv-42\/fixed-uuid-123-report\.pdf$/);
+    });
+
+    it('should include UUID in key to prevent enumeration', () => {
+      const key = svc._generateKey('t1', 'i1', 'doc.pdf');
+      expect(key).toContain('fixed-uuid-123');
+    });
+  });
+
+  describe('uploadFile validation', () => {
+    const svc = new StorageService();
+
+    it('should reject oversized files', async () => {
+      const bigBuffer = Buffer.alloc(svc.maxFileSize + 1);
+      await expect(
+        svc.uploadFile(bigBuffer, 'test.pdf', 'application/pdf')
+      ).rejects.toThrow('exceeds maximum');
+    });
+
+    it('should reject invalid MIME types', async () => {
+      const buf = Buffer.from('small content');
+      await expect(
+        svc.uploadFile(buf, 'test.html', 'text/html')
+      ).rejects.toThrow('Invalid MIME type');
+    });
+  });
+
+  describe('getPresignedUploadUrl validation', () => {
+    const svc = new StorageService();
+
+    it('should reject oversized file sizes', async () => {
+      await expect(
+        svc.getPresignedUploadUrl({
+          tenantId: 't1',
+          invoiceId: 'i1',
+          fileName: 'big.pdf',
+          mimeType: 'application/pdf',
+          fileSize: svc.maxFileSize + 1,
+        })
+      ).rejects.toThrow('exceeds maximum');
+    });
+
+    it('should reject invalid MIME types', async () => {
+      await expect(
+        svc.getPresignedUploadUrl({
+          tenantId: 't1',
+          invoiceId: 'i1',
+          fileName: 'bad.html',
+          mimeType: 'text/html',
+          fileSize: 100,
+        })
+      ).rejects.toThrow('Invalid MIME type');
+    });
+  });
+});
+
+describe('InvoiceFile Route - Presigned Upload (POST /api/invoices/:id/presigned-upload)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should generate presigned upload URL', async () => {
+    storageService.getPresignedUploadUrl.mockResolvedValue({
+      url: 'https://s3.example.com/presigned',
+      key: 'tenants/unknown/invoices/inv-456/uuid-file.pdf',
+    });
+
     const response = await request(app)
-      .post('/api/sme/invoice')
-      .attach('invoice', Buffer.from('fake content'), 'test.txt')
-      .set('Content-Type', 'multipart/form-data');
+      .post('/api/invoices/inv-456/presigned-upload')
+      .send({
+        fileName: 'invoice.pdf',
+        mimeType: VALID_PDF_MIME,
+        fileSize: 50000,
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.uploadUrl).toBe('https://s3.example.com/presigned');
+    expect(response.body.data.fileKey).toContain('tenants/unknown/invoices/inv-456');
+  });
+
+  it('should return 400 for missing invoice ID', async () => {
+    const response = await request(app)
+      .post('/api/invoices//presigned-upload')
+      .send({ fileName: 'test.pdf', mimeType: VALID_PDF_MIME, fileSize: 100 });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Only PDF files are allowed');
+  });
+
+  it('should return 400 for missing fields', async () => {
+    const response = await request(app)
+      .post('/api/invoices/inv-1/presigned-upload')
+      .send({ fileName: 'test.pdf' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('Bad Request');
+  });
+
+  it('should return 400 for invalid MIME type', async () => {
+    const error = new Error('Invalid MIME type');
+    error.code = 'INVALID_MIME_TYPE';
+    storageService.getPresignedUploadUrl.mockRejectedValue(error);
+
+    const response = await request(app)
+      .post('/api/invoices/inv-1/presigned-upload')
+      .send({
+        fileName: 'test.html',
+        mimeType: 'text/html',
+        fileSize: 100,
+      });
+
+    expect(response.status).toBe(400);
+  });
+
+  it('should never leak credentials in response', async () => {
+    storageService.getPresignedUploadUrl.mockResolvedValue({
+      url: 'https://s3.example.com/presigned',
+      key: 'tenants/uuid/invoices/uuid/file.pdf',
+    });
+
+    const response = await request(app)
+      .post('/api/invoices/inv-1/presigned-upload')
+      .send({
+        fileName: 'invoice.pdf',
+        mimeType: VALID_PDF_MIME,
+        fileSize: 50000,
+      });
+
+    const bodyString = JSON.stringify(response.body);
+    expect(bodyString).not.toContain('AKIA');
+    expect(bodyString).not.toContain('secretAccessKey');
+    expect(bodyString).not.toContain('AWS');
   });
 });
