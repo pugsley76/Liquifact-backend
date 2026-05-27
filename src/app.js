@@ -21,7 +21,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { callSorobanContract } = require('./services/soroban');
-const invoiceService = require('./services/invoice.service');
+const invoiceService = require('./services/invoiceService');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const { validateInvoiceQueryParams, validateInvoicePayload } = require('./utils/validators');
