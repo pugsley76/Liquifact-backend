@@ -45,7 +45,8 @@ function normalizeMetadata(metadata) {
   return redactValue(metadata);
 }
 
-async function appendAuditEvent(event) {
+async function appendAuditEvent(event, options = {}) {
+  const knex = options.db || db;
   const record = {
     event_type: event.eventType,
     action: event.action,
@@ -62,7 +63,7 @@ async function appendAuditEvent(event) {
     metadata: JSON.stringify(normalizeMetadata(event.metadata)),
   };
 
-  await db('audit_log_events').insert(record);
+  await knex('audit_log_events').insert(record);
 }
 
 module.exports = {

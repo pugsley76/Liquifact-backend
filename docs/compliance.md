@@ -446,6 +446,13 @@ npm test -- kyc.gating
 npm test -- kyc.gating --watch
 ```
 
+### Audit Log Append-Only Triggers (Postgres)
+
+The `audit_log_events` table is enforced as append-only at the database layer via triggers (UPDATE/DELETE raise `audit_log_events is append-only`).
+
+- Integration test: `tests/integration/auditAppendOnly.test.js`
+- This test runs only when a Postgres target is available (e.g. `docker-compose.dev.yml` Postgres). It skips gracefully when only SQLite is available (SQLite does not support these triggers).
+
 ### Manual Testing
 
 Using cURL or Postman:
