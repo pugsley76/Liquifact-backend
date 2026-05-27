@@ -1,11 +1,11 @@
 const request = require('supertest');
 const { createApp } = require('../app');
 
-jest.mock('../services/invoice.service', () => ({
+jest.mock('../services/invoiceService', () => ({
   getInvoices: jest.fn(),
 }));
 
-const invoiceService = require('../services/invoice.service');
+const invoiceService = require('../services/invoiceService');
 
 describe('Invoice API Integration', () => {
   let app;

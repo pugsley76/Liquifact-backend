@@ -1,12 +1,29 @@
-/**
- * Invoice Service
- * Handles data retrieval and business logic for invoices.
- * Includes KYC compliance tracking for funding operations.
+/*
+ * Consolidated Invoice Service
+ * Canonical implementation that supports both query-style `getInvoices(queryParams)`
+ * used by API routes/tests and tenant-scoped `getInvoices(tenantId, status)` used elsewhere.
+ *
+ * Preserves soft-delete via `deleted_at`, tenant scoping, KYC helpers, and exports
+ * a `mockInvoices` array for tests that rely on in-memory fixtures.
  */
 
+'use strict';
+
+const db = require('../db/knex');
+const { applyQueryOptions } = require('../utils/queryBuilder');
 const logger = require('../logger');
 
-// Placeholder mock database (this would normally be a real database like PostgreSQL)
+const INVOICE_QUERY_CONFIG = {
+  allowedFilters: ['status', 'smeId', 'buyerId', 'dateFrom', 'dateTo'],
+  allowedSortFields: ['amount', 'date'],
+  columnMap: {
+    smeId: 'sme_id',
+    buyerId: 'buyer_id',
+    dateFrom: 'date',
+    dateTo: 'date',
+  },
+};
+
 const mockInvoices = [
   {
     id: 'inv_1',
@@ -34,168 +51,93 @@ const mockInvoices = [
     createdAt: new Date().toISOString(),
     deletedAt: null,
   },
-  {
-    id: 'inv_3',
-    status: 'funded',
-    amount: 5000,
-    customer: 'Charlie Ltd',
-    ownerId: 'user_2',
-    smeId: 'sme_003',
-    kycStatus: 'verified',
-    kycRecordId: 'kyc_sme_003_001',
-    kycStatusUpdatedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-    deletedAt: null,
-  },
 ];
 
-/**
- * Get a single invoice by its ID.
- * Performs authorization checks and includes KYC status.
- *
- * @param {string} id - The unique identifier of the invoice.
- * @param {string} tenantId - The tenant ID for isolation.
- * @returns {Object|null} The invoice data or null if not found.
- */
-const getInvoiceById = async (id, tenantId) => {
-  // 1. Basic validation
-  if (!id || typeof id !== 'string') {
-    throw new Error('Invalid invoice ID');
+async function getInvoices(arg1 = {}, arg2) {
+  // If first argument is an object, treat it as queryParams (even empty {})
+  if (arg1 && typeof arg1 === 'object') {
+    const queryParams = arg1;
+    try {
+      let query = db('invoices').select('*');
+      query = applyQueryOptions(query, queryParams, INVOICE_QUERY_CONFIG);
+      return await query;
+    } catch (err) {
+      logger.error({ err }, 'Error fetching invoices');
+      throw new Error('Database error while fetching invoices');
+    }
   }
 
-  // 2. Fetch from DB with tenant isolation
-  const invoice = await db('invoices')
-    .where({ invoice_id: id, tenant_id: tenantId, deleted_at: null })
-    .first();
-
-  // 3. Not Found handling
-  if (!invoice) {
-    return null;
+  // Otherwise treat args as (tenantId, status)
+  const tenantId = arg1;
+  const status = arg2;
+  if (!tenantId) {
+    throw new TypeError('tenantId is required');
   }
 
-  return invoice;
-};
-
-/**
- * Get all invoices for a tenant, with optional status filter.
- *
- * @param {string} tenantId - The tenant ID.
- * @param {string} [status] - Optional status filter.
- * @returns {Array} List of invoices.
- */
-const getInvoices = async (tenantId, status) => {
-  let query = db('invoices')
-    .where({ tenant_id: tenantId, deleted_at: null })
-    .orderBy('created_at', 'desc');
-
-  if (status) {
-    query = query.where({ status });
-  }
-
+  let query = db('invoices').where({ tenant_id: tenantId, deleted_at: null }).orderBy('created_at', 'desc');
+  if (status) query = query.where({ status });
   return await query;
-};
+}
 
-/**
- * Create a new invoice.
- *
- * @param {Object} invoiceData - The invoice data.
- * @param {string} tenantId - The tenant ID.
- * @returns {Object} The created invoice.
- */
-const createInvoice = async (invoiceData, tenantId) => {
-  const { amount, customer, status = 'pending', metadata } = invoiceData;
+async function getInvoiceById(id, tenantId) {
+  if (!id || typeof id !== 'string') {
+    throw new TypeError('Invalid invoice ID');
+  }
+  const invoice = await db('invoices').where({ invoice_id: id, tenant_id: tenantId, deleted_at: null }).first();
+  return invoice || null;
+}
 
+async function createInvoice(invoiceData, tenantId) {
+  const { amount, customer, status = 'pending', metadata } = invoiceData || {};
   const invoiceId = `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
   const [newInvoice] = await db('invoices')
-    .insert({
-      invoice_id: invoiceId,
-      amount,
-      customer,
-      status,
-      tenant_id: tenantId,
-      metadata: metadata || null,
-    })
+    .insert({ invoice_id: invoiceId, amount, customer, status, tenant_id: tenantId, metadata: metadata || null })
     .returning('*');
-
   return newInvoice;
-};
+}
 
-/**
- * Update invoice status.
- *
- * @param {string} id - Invoice ID.
- * @param {string} status - New status.
- * @param {string} tenantId - Tenant ID.
- * @returns {Object|null} Updated invoice or null.
- */
-const updateInvoiceStatus = async (id, status, tenantId) => {
-  const [updated] = await db('invoices')
-    .where({ invoice_id: id, tenant_id: tenantId })
-    .update({ status, updated_at: db.fn.now() })
-    .returning('*');
-
+async function updateInvoice(id, updates = {}, tenantId) {
+  if (!id) throw new TypeError('invoice id required');
+  const nowVal = db && db.fn && typeof db.fn.now === 'function' ? db.fn.now() : new Date().toISOString();
+  const [updated] = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).update({ ...updates, updated_at: nowVal }).returning('*');
   return updated || null;
-};
+}
 
-/**
- * Get invoices with optional filtering by KYC status
- * 
- * @param {Object} options - Filter options
- * @param {string} options.userId - User ID for authorization
- * @param {string} options.kycStatus - Filter by KYC status (optional)
- * @returns {Array} Invoices matching criteria
- */
-const getInvoicesByKycStatus = (userId, kycStatus) => {
-  if (!userId) {
-    throw new Error('User ID required');
-  }
+async function deleteInvoice(id, tenantId) {
+  if (!id) throw new TypeError('invoice id required');
+  const nowVal = db && db.fn && typeof db.fn.now === 'function' ? db.fn.now() : new Date().toISOString();
+  const [updated] = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).update({ deleted_at: nowVal }).returning('*');
+  return updated || null;
+}
 
+function getInvoicesByKycStatus(userId, kycStatus) {
+  if (!userId) throw new TypeError('User ID required');
   let filtered = mockInvoices.filter((inv) => inv.ownerId === userId && !inv.deletedAt);
-
-  if (kycStatus) {
-    filtered = filtered.filter((inv) => inv.kycStatus === kycStatus);
-  }
-
+  if (kycStatus) filtered = filtered.filter((inv) => inv.kycStatus === kycStatus);
   return filtered;
-};
+}
 
-/**
- * Update KYC status for an invoice
- * 
- * @param {string} invoiceId - Invoice ID
- * @param {string} newKycStatus - New KYC status
- * @param {string} kycRecordId - KYC record reference
- * @returns {Object} Updated invoice
- */
-const updateInvoiceKycStatus = (invoiceId, newKycStatus, kycRecordId = null) => {
+function updateInvoiceKycStatus(invoiceId, newKycStatus, kycRecordId = null) {
   const invoice = mockInvoices.find((inv) => inv.id === invoiceId);
-
-  if (!invoice) {
-    throw new Error(`Invoice ${invoiceId} not found`);
-  }
-
+  if (!invoice) throw new Error(`Invoice ${invoiceId} not found`);
   const validStatuses = ['pending', 'verified', 'rejected', 'exempted'];
-  if (!validStatuses.includes(newKycStatus)) {
-    throw new Error(`Invalid KYC status: ${newKycStatus}`);
-  }
-
+  if (!validStatuses.includes(newKycStatus)) throw new Error(`Invalid KYC status: ${newKycStatus}`);
   const previousStatus = invoice.kycStatus;
   invoice.kycStatus = newKycStatus;
   invoice.kycRecordId = kycRecordId;
   invoice.kycStatusUpdatedAt = new Date().toISOString();
-
-  logger.info(
-    { invoiceId, previousStatus, newStatus: newKycStatus },
-    'Invoice KYC status updated'
-  );
-
+  logger.info({ invoiceId, previousStatus, newStatus: newKycStatus }, 'Invoice KYC status updated');
   return invoice;
-};
+}
 
 module.exports = {
+  getInvoices,
   getInvoiceById,
+  createInvoice,
+  updateInvoice,
+  deleteInvoice,
   getInvoicesByKycStatus,
   updateInvoiceKycStatus,
-  mockInvoices, // Exported for testing purposes
+  mockInvoices,
+  INVOICE_QUERY_CONFIG,
 };

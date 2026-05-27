@@ -1,14 +1,14 @@
 const cors = require('cors');
 const request = require('supertest');
 
-jest.mock('./services/invoice.service', () => ({
+jest.mock('./services/invoiceService', () => ({
   getInvoices: jest.fn(),
 }));
 
 const { createApp, handleCorsError } = require('./app');
 const { CORS_REJECTION_MESSAGE } = require('./config/cors');
 const { createCorsOptions } = require('./config/cors');
-const invoiceService = require('./services/invoice.service');
+const invoiceService = require('./services/invoiceService');
 
 function withEnv(env, fn) {
   const previousValues = new Map();

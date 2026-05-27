@@ -1,5 +1,5 @@
 const db = require('../../src/db/knex');
-const { getInvoices } = require('../../src/services/invoice.service');
+const { getInvoices } = require('../../src/services/invoiceService');
 
 // Mock Knex
 jest.mock('../../src/db/knex', () => {

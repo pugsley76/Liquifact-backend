@@ -15,7 +15,7 @@
 'use strict';
 
 // Uses Jest globals: describe, it, expect, beforeEach, beforeAll, jest
-jest.mock('../services/invoice.service');
+jest.mock('../services/invoiceService');
 
 const request = require('supertest');
 const express = require('express');
