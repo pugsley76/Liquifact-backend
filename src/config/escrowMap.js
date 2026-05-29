@@ -106,7 +106,7 @@ function getCurrentEnvironment() {
   try {
     const config = getConfig();
     return config.NODE_ENV || 'development';
-  } catch (error) {
+  } catch (_error) {
     // Config not validated, fall back to environment variable
     return process.env.NODE_ENV || 'development';
   }
@@ -200,6 +200,34 @@ function resolveEscrowAddress(invoiceId, environment) {
   }
 
   return mapping.escrowAddress;
+}
+
+/**
+ * Reverse-resolves a Stellar escrow contract address to its invoice ID.
+ *
+ * Used by the escrow indexer to key Horizon contract events by the invoice
+ * they belong to, rather than by the raw contract address. Performs an exact,
+ * case-sensitive match against active mappings in the target environment.
+ *
+ * @param {string} escrowAddress - Stellar escrow contract address to reverse-resolve
+ * @param {string} [environment] - Target environment (defaults to current)
+ * @returns {string|null} Matching invoice ID, or null if no active mapping exists
+ */
+function resolveInvoiceByAddress(escrowAddress, environment) {
+  if (!escrowAddress || typeof escrowAddress !== 'string') {
+    return null;
+  }
+
+  const targetEnv = environment || getCurrentEnvironment();
+  const config = parseEscrowMappingConfig();
+
+  const mapping = config.mappings.find(m =>
+    m.escrowAddress === escrowAddress &&
+    m.environment === targetEnv &&
+    m.isActive
+  );
+
+  return mapping ? mapping.invoiceId : null;
 }
 
 /**
@@ -309,6 +337,7 @@ function getCacheStats() {
 
 module.exports = {
   resolveEscrowAddress,
+  resolveInvoiceByAddress,
   isInvoiceAllowlisted,
   getActiveMappings,
   validateMappingConfig,
